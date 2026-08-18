@@ -254,12 +254,21 @@ class IoTPipelineOrchestrator:
                 product = banner_match.group(1)
                 version = banner_match.group(2)
                 
-                # 更新 Port 80 記憶 (消除 unknown)
-                self.shared_memory["discovered_services"]["80"] = {
-                    "name": product,
-                    "version": version
-                }
-                print(f"[+] [記憶體即時同步] Port 80 已順利更新為 '{product} {version}'")
+                # 1. 動態從傳入的指令參數抓取 Port (若無指定則預設 "80")
+                target_raw_port = "80"
+                if "action_params" in locals() and action_params:
+                    target_raw_port = str(action_params[0])
+                
+                # 2. 透過 _normalize_port 動態轉換成標準格式 (如 "80/tcp" 或 "8080/tcp")
+                target_port = self._normalize_port(target_raw_port)
+                
+                # 3. 動態更新記憶體
+                if target_port not in self.shared_memory["discovered_services"]:
+                    self.shared_memory["discovered_services"][target_port] = {}
+                
+                self.shared_memory["discovered_services"][target_port]["name"] = product
+                self.shared_memory["discovered_services"][target_port]["version"] = version
+                print(f"[+] [記憶體即時同步] Port {target_port} 已順利更新為 '{product} {version}'")
 
         elif action_name == "RUN_NVD_LOOKUP":
             print("[🔍 實體工具呼叫] 正在向 NVD 資料庫檢索已知漏洞...")
@@ -356,30 +365,30 @@ class IoTPipelineOrchestrator:
 
         return "\n".join(context_lines)
 
+    def _normalize_port(self, port_raw, default_proto="tcp") -> str:
+        """統一轉成 <port>/<protocol> 格式 (如 '80/tcp', '67/udp')"""
+        s = str(port_raw).strip().lower()
+        if "/" not in s:
+            return f"{s}/{default_proto}"
+        return s
+
     def _update_stage1_memory(self, perception_result: dict):
-        """解析 Stage 1 的 JSON，更新服務與版本記憶（純資產盤點，不涉及 CVE/NVD）"""
+        """解析 Stage 1 的 JSON，更新服務與版本記憶"""
         services = perception_result.get("services", {})
         open_ports = perception_result.get("open_ports", [])
-        
-        # 1. 優先處理 open_ports，確保 open 的 Port 100% 都有建檔 (哪怕 service 是 unknown)
-        for p in open_ports:
-            port_str = str(p)
-            if port_str not in self.shared_memory["discovered_services"]:
-                self.shared_memory["discovered_services"][port_str] = {
-                    "name": "unknown",
-                    "version": "unknown"
-                }
 
-        # 2. 用 LLM 解析出的 services 細節來增量更新或補全服務名稱與版本
+        # 1. 優先處理 services 裡帶有完整協定 (如 /udp, /tcp) 的 Key
         for port, info in services.items():
-            port_str = str(port)
-            service_name = info.get("service", info.get("name", "unknown"))
-            service_version = info.get("version", "unknown")
+            port_str = self._normalize_port(port)
 
-            # 取得目前的舊資料 (如果有的話)
+            if isinstance(info, dict):
+                service_name = info.get("service", info.get("name", "unknown"))
+                service_version = info.get("version", "unknown")
+            else:
+                service_name = str(info)
+                service_version = "unknown"
+
             current_node = self.shared_memory["discovered_services"].get(port_str, {})
-            
-            # 增量覆蓋：只在拿到「非 unknown」的新資訊時覆蓋舊資訊 (避免把原本查到的版本洗掉)
             final_name = service_name if service_name != "unknown" else current_node.get("name", "unknown")
             final_version = service_version if service_version != "unknown" else current_node.get("version", "unknown")
 
@@ -388,9 +397,23 @@ class IoTPipelineOrchestrator:
                 "version": final_version
             }
 
-        # 同步到 TaskTree 的 scanned_ports！
+        # 2. 處理 open_ports：若埠號已被 services 建檔（無論 tcp/udp），就不再重複補建
+        for p in open_ports:
+            p_str = str(p).strip().lower()
+            # 檢查目前記憶體中是否已有該 Port (例如已存在 "67/udp" 或 "80/tcp")
+            already_exists = any(
+                existing_key == p_str or existing_key.startswith(f"{p_str}/")
+                for existing_key in self.shared_memory["discovered_services"]
+            )
+            if not already_exists:
+                port_str = self._normalize_port(p_str)
+                self.shared_memory["discovered_services"][port_str] = {
+                    "name": "unknown",
+                    "version": "unknown"
+                }
+
+        # 3. 同步到 TaskTree
         if hasattr(self, "task_tree"):
-            # 如果 TaskTree 的結構是 {"80": {"service": "http", "version": "1.4.28"}}
             self.task_tree.scanned_ports = {
                 port: {
                     "service": info["name"],

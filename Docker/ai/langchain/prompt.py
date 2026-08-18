@@ -10,7 +10,7 @@ _IDENTITY = (
 
 _STAGE1_TOOLS = """TOOLS & CAPABILITIES (Stage 1: Reconnaissance & Enumeration Only):
 You have access to information gathering and enumeration tools ONLY:
-- nmap, masscan - Port scanning, service enumeration, and protocol-specific auditing (supports -sT, -sU for UDP/DNS, and NSE scripts for version detection)
+- nmap - Port scanning, service enumeration, and protocol-specific auditing 
 - gobuster, ffuf, dirb - Directory, file, and endpoint brute-forcing
 - nikto, wpscan - Passive Web and CMS vulnerability scanning and fingerprinting
 - curl, wget - HTTP/HTTPS banner grabbing, header analysis, and API endpoint discovery"""
@@ -31,7 +31,6 @@ _CRITICAL_RULES = """CRITICAL RULES FOR ACCURACY & MINDSET:
 CRITICAL TRAFFIC REGULATION & FRAGILE PORT PROTECTION (ANTI-CRASH):
 8. WEBSERVER STABILITY GUARD: Web ports (e.g., HTTP 80, HTTPS 443) on embedded/IoT targets are extremely fragile and prone to service crashes. Your 'recommended_next_steps' MUST ABSOLUTELY AVOID high-frequency, noisy brute-force directory scanning or heavy automated vulnerability scans (such as running gobuster, dirb, or repetitive nikto) that will exhaustion connection backlogs.
 9. PRECISE EXPLOITATION ONLY: Active vulnerability exploitation is fully allowed and encouraged, but it MUST be executed via a single, precise, targeted payload (e.g., a one-shot exploit or custom PoC script). Do NOT poke, hammer, or flood the fragile web server with unnecessary probes. If a robust alternative service (like DNS Port 53) has high-severity, reliable CVEs available, prioritize exploiting that channel over the fragile web layer to maintain persistence.
-10. TOOL DIVERSITY & ANTI-REPETITION: Do NOT use the exact same tool or command sequence that was used in the immediately preceding turn for the same objective. If a tool was already executed on a target service, you MUST pivot to a different tool, a deeper manual script, a specific exploit module, or a different reconnaissance/exploitation angle to avoid redundant scans and ensure progressive coverage.
 
 CRITICAL STATE-KEEPING & MEMORY RULES (ANTI-AMNESIA):
 4. 'open_ports' and 'services' are CUMULATIVE fields. They MUST represent the entire history of the target across the timeline, NOT just the current turn.

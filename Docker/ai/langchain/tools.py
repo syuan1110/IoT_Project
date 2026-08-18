@@ -15,50 +15,122 @@ class PentestToolbox:
         self.mapped_cves = []       # 共享記憶體：儲存經 NVD 查詢並篩選後的結構化 CVE 漏洞清單
 
     def run_nmap(self):
-        """
-        一：執行原本的 TCP 盲掃，確認開放的通訊埠
-        二：若發現 Port 53 開放，『單獨且僅針對』53 啟動溫和版本偵測（-sV）
-        """   
-        # 1. 執行您原本設定好的安全盲掃指令（此時完全不帶 -sV）
-        command = ["nmap", "-sS", "-F", "--max-rate", "10", "-T3", self.target_ip]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=90)
-            raw_log = result.stdout
-            if result.stderr:
-                raw_log += f"\n[Stderr]\n{result.stderr}"
-            
-            # 2. 透過正則表達式，快速檢查 Nmap 的盲掃結果中，Port 53 是否為 open
-            # 匹配範例: "53/tcp  open  domain"
-            is_53_open = False
-            for line in raw_log.splitlines():
-                if re.search(r"53/tcp\s+open", line):
-                    is_53_open = True
-                    break
-                
-            # 3. 【核心隔離決策】：如果 53 有開，單獨對 53 進行版本獲取
-            if is_53_open:
-                # 強制加上 -p 53 鎖死目標，完全繞過並保護 Port 80
-                targeted_53_command = [
-                    "nmap", 
-                    "-p", "53", 
-                    "-sV", 
-                    "--version-intensity", "5",  # 中等強度
-                    "--max-rate", "10", 
-                    self.target_ip
-                ]
-            
-                res_53 = subprocess.run(targeted_53_command, capture_output=True, text=True, check=True, timeout=30)
-            
-                # 將第二階段拿到的精準 dnsmasq 2.41 報告，附加在原本的 Raw Log 後面
-                # 這樣後續的 Python 解析器或 AI 就能直接讀到 53 號埠的真實版本，消除 unknown
-                raw_log += f"\n\n=== Targeted Port 53 Service Detection Result ===\n{res_53.stdout}"
-                if res_53.stderr:
-                    raw_log += f"\n[Targeted Stderr]\n{res_53.stderr}"
-                
-            return raw_log
+        """一：執行 TCP 安全盲掃 (-sT 避開 raw socket 權限與 QEMU slirp 問題)
 
+        二：若 TCP 53 開放，單獨做 -sV 版本偵測
+        三：針對核心 UDP 服務先進行快速探測，過濾出開放的 Port 後再追加 -sV 精準偵測
+        """
+        raw_log = ""
+
+        # 1. TCP 掃描：改用 -sT (Connect scan)，不需要 root 權限，且對 QEMU 網路相容性最好
+        command = [
+            "nmap",
+            "-sT",
+            "-F",
+            "--max-rate",
+            "50",
+            "-T3",
+            self.target_ip,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            raw_log += result.stdout
+            if result.stderr:
+                raw_log += f"\n[TCP Stderr]\n{result.stderr}"
         except Exception as e:
-            return f"[Nmap Error] {str(e)}"
+            raw_log += f"\n[TCP Scan Failed]: {str(e)}"
+
+        # 2. Port 53 TCP 精準版本偵測 (改用正則表達式防誤判)
+        if re.search(r"53/tcp\s+open", raw_log):
+            targeted_53_command = [
+                "nmap",
+                "-sT",
+                "-p",
+                "53",
+                "-sV",
+                "--version-intensity",
+                "5",
+                self.target_ip,
+            ]
+            try:
+                res_53 = subprocess.run(
+                    targeted_53_command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                raw_log += f"\n\n=== Targeted Port 53 Service Detection Result ===\n{res_53.stdout}"
+            except Exception as e:
+                raw_log += f"\n[Port 53 Scan Failed]: {str(e)}"
+
+        # 3. 關鍵 UDP Port 快速篩選
+        target_udp_ports = "53,67,69,161,1900,5000,5351"
+        udp_fast_command = [
+            "nmap",
+            "-sU",
+            "-p",
+            target_udp_ports,
+            "--max-rate",
+            "30",
+            "--max-retries",
+            "1",
+            self.target_ip,
+        ]
+
+        udp_scan_stdout = ""
+        try:
+            res_udp = subprocess.run(
+                udp_fast_command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=45,
+            )
+            udp_scan_stdout = res_udp.stdout
+            raw_log += f"\n\n=== UDP Quick Scan Result ===\n{udp_scan_stdout}"
+        except Exception as e:
+            raw_log += f"\n[UDP Quick Scan Failed]: {str(e)}"
+
+        # 4. 【新增】對有回應的 UDP Port 進行 -sV 精準版本偵測
+        # 抓取輸出中狀態為 open 或 open|filtered 的 UDP Port
+        open_udp_ports = re.findall(
+            r"(\d+)/udp\s+(?:open|open\|filtered)", udp_scan_stdout
+        )
+
+        if open_udp_ports:
+            ports_str = ",".join(open_udp_ports)
+            udp_sv_command = [
+                "nmap",
+                "-sU",
+                "-sV",
+                "--version-intensity",
+                "4",
+                "-p",
+                ports_str,
+                "--max-retries",
+                "1",
+                self.target_ip,
+            ]
+            try:
+                res_udp_sv = subprocess.run(
+                    udp_sv_command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=60,  
+                )
+                raw_log += f"\n\n=== UDP Detailed Service/Version Detection Result ===\n{res_udp_sv.stdout}"
+            except Exception as e:
+                raw_log += f"\n[UDP Version Scan Failed]: {str(e)}"
+
+        return raw_log
 
     def run_nikto(self):
         """Nikto 網頁伺服器版本與潛在漏洞掃描，並自動提煉 Server Banner"""
