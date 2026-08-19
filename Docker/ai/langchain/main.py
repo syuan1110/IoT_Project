@@ -177,7 +177,7 @@ class IoTPipelineOrchestrator:
         # 🧠 跨階段共享記憶體 (結構化白板)
         # ==========================================
         self.shared_memory = {
-            "vendor": {},
+            "vendor": "",
             "discovered_services": {}, # 格式: {"80": "lighttpd 1.4.28", "53": "dnsmasq 2.41"}
             "mapped_cves": self.toolbox.mapped_cves,  # 格式: [{"cve": "CVE-2017-14491", "service": "dnsmasq", "cvss": 9.8}]
             "tried_exploits": [],      # 格式: [{"cve": "CVE-2017-14491", "status": "FAILED", "reason": "Connection reset"}]
