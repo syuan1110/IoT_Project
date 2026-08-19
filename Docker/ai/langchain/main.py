@@ -19,12 +19,31 @@ logger = logging.getLogger(__name__)
 def ai_parsing_module(raw_log, prior_context=""):
     """【Stage 1: 感知模組】分析最新 Nmap/掃描日誌，回傳標準化 JSON"""
     print("\n[感知模組 Stage 1] 正在叫 Qwen2.5-Coder 分析最新日誌...")
-    
-    if "PORT STATE SERVICE" in str(raw_log) or "/tcp" in str(raw_log):
+
+    raw_log_str = str(raw_log)
+
+    # 1. 修改條件：只要包含 /tcp 或 /udp 或是 Nmap 特徵字，就進行適度日誌清理
+    if any(
+        k in raw_log_str for k in ["PORT", "/tcp", "/udp", "Nmap scan report"]
+    ):
         cleaned_lines = []
-        for line in raw_log.split('\n'):
-            if "/tcp" in line or "/udp" in line or "PORT" in line:
-                cleaned_lines.append(line.strip())
+        for line in raw_log_str.split("\n"):
+            line_str = line.strip()
+            # 保留含有關鍵資訊的行（包含表頭、分隔線、TCP、UDP 與 Nmap 關鍵字）
+            if any(
+                k in line_str
+                for k in [
+                    "/tcp",
+                    "/udp",
+                    "PORT",
+                    "STATE",
+                    "SERVICE",
+                    "Nmap scan report",
+                    "===",
+                ]
+            ):
+                cleaned_lines.append(line_str)
+
         if len(cleaned_lines) > 1:
             raw_log = "\n".join(cleaned_lines)
             print("\n==================================================")
@@ -32,13 +51,13 @@ def ai_parsing_module(raw_log, prior_context=""):
             print("--------------------------------------------------")
             print(raw_log)
             print("==================================================")
-    
+
     system_prompt = get_stage1_system_prompt()
     user_content = f"""{prior_context}
 
 === NEW EXECUTED RAW LOG TO ANALYZE ===
 {raw_log}"""
-    
+
     return _call_ollama_and_parse_json(system_prompt, user_content, "Stage 1")
 
 
@@ -158,6 +177,7 @@ class IoTPipelineOrchestrator:
         # 🧠 跨階段共享記憶體 (結構化白板)
         # ==========================================
         self.shared_memory = {
+            "vendor": {},
             "discovered_services": {}, # 格式: {"80": "lighttpd 1.4.28", "53": "dnsmasq 2.41"}
             "mapped_cves": self.toolbox.mapped_cves,  # 格式: [{"cve": "CVE-2017-14491", "service": "dnsmasq", "cvss": 9.8}]
             "tried_exploits": [],      # 格式: [{"cve": "CVE-2017-14491", "status": "FAILED", "reason": "Connection reset"}]
@@ -167,6 +187,7 @@ class IoTPipelineOrchestrator:
     def run_pipeline(self):
         print(f"\n[*] ─── 啟動門戶：IoT 非線性動態流水線 ───")
         
+        self.nmap_log = self.toolbox.run_nmap()
         current_log = self.toolbox.run_nmap()
         max_turns = 5
         turn = 0
@@ -181,7 +202,7 @@ class IoTPipelineOrchestrator:
             # 2. 根據當前狀態派發給 AI 解析 Log
             if self.current_state == "stage1_recon":
                 perception_result = ai_parsing_module(current_log, prior_context)
-                self._update_stage1_memory(perception_result)
+                self._update_stage1_memory(perception_result, raw_log=self.nmap_log)
                 
             elif self.current_state == "stage2_cve_mapping":
                 if "CVE-" not in current_log and "Vulnerabilities" not in current_log:
@@ -276,6 +297,90 @@ class IoTPipelineOrchestrator:
             nvd_markdown_report = self.toolbox.run_nvd_lookup(services)
             self.shared_memory["discovered_services"] = services
             return nvd_markdown_report  # <-- 這會直接回傳 Markdown 格式的 CVE 報告！
+
+        elif action_name == "RUN_CURL":
+            # 1. 解析目標 Port (預設 80)
+            target_port_str = "80/tcp"
+
+            # (A) 優先讀取 AI 指令帶入的參數 (例如: RUN_CURL 8080)
+            if "action_params" in locals() and action_params:
+                target_port_str = self._normalize_port(str(action_params[0]))
+
+            # (B) 若無參數，從 Shared Memory 動態尋找 Web 服務 Port
+            else:
+                services = self.shared_memory.get("discovered_services", {})
+                for port_key, info in services.items():
+                    svc_name = str(info.get("name", "")).lower()
+                    if (
+                        "http" in svc_name
+                        or "web" in svc_name
+                        or port_key
+                        in ["80/tcp", "443/tcp", "8080/tcp", "8443/tcp"]
+                    ):
+                        target_port_str = port_key
+                        break
+
+            # 2. 提取整數 Port 數字 (如從 "8080/tcp" 提取出整數 8080)
+            port_num = (
+                int(target_port_str.split("/")[0])
+                if "/" in target_port_str
+                else int(target_port_str)
+            )
+
+            print(
+                f"[+] 正在背景對 Port {port_num} 執行 Curl HTTP 探測，請稍候..."
+            )
+
+            # 3. 呼叫 Toolbox 並傳入正確型別的 port
+            curl_res = self.toolbox.run_curl(port=port_num)
+
+            # 4. 處理回傳結果：將 dict 格式化為 LLM 感知模組可讀的 Raw Log 字串
+            if isinstance(curl_res, dict):
+                if curl_res.get("status") == "success":
+                    headers_text = curl_res.get("headers", "")
+                    log = f"=== Curl Response Headers (Port {port_num}) ===\n{headers_text}\n\n=== Body Snippet ===\n{curl_res.get('body_snippet', '')}"
+
+                    # 自動更新 Shared Memory 中的 Server Banner (如果存在)
+                    banner_match = re.search(
+                        r"[Ss]erver:\s*([a-zA-Z0-9\-_]+)[/\s]([\d\.]+)",
+                        headers_text,
+                    )
+                    if banner_match:
+                        product, version = (
+                            banner_match.group(1),
+                            banner_match.group(2),
+                        )
+                        normalized_key = self._normalize_port(
+                            str(port_num) + "/tcp"
+                        )
+
+                        if (
+                            normalized_key
+                            not in self.shared_memory["discovered_services"]
+                        ):
+                            self.shared_memory["discovered_services"][
+                                normalized_key
+                            ] = {}
+
+                        self.shared_memory["discovered_services"][
+                            normalized_key
+                        ]["name"] = product
+                        self.shared_memory["discovered_services"][
+                            normalized_key
+                        ]["version"] = version
+                        print(
+                            f"[+] [記憶體即時同步] Port {normalized_key}"
+                            f" 已順利更新為 '{product} {version}'"
+                        )
+                else:
+                    log = (
+                        f"[Curl Error] Target Port {port_num} -"
+                        f" {curl_res.get('error', 'Unknown Error')}"
+                    )
+            else:
+                log = str(curl_res)
+
+            return log
 
         elif action_name == "RUN_EXPLOIT_DLINK":
             print("[🔥 關鍵行動] 偵測到漏洞，正在向 D-Link 模擬相機發送 CVE 攻擊 Payload...")
@@ -372,12 +477,45 @@ class IoTPipelineOrchestrator:
             return f"{s}/{default_proto}"
         return s
 
-    def _update_stage1_memory(self, perception_result: dict):
-        """解析 Stage 1 的 JSON，更新服務與版本記憶"""
-        services = perception_result.get("services", {})
-        open_ports = perception_result.get("open_ports", [])
+    def _update_stage1_memory(self, perception_result: dict, raw_log: str = ""):
+        # 1. 第一層保險：Regex 自動解析原始 Nmap 日誌
+        if raw_log:
+            pattern = r"(\d+)/(tcp|udp)\s+(open\|filtered|open)\s+([\w\-\?\/\(\)]+)(?:\s+(.+))?"
 
-        # 1. 優先處理 services 裡帶有完整協定 (如 /udp, /tcp) 的 Key
+            for line in raw_log.splitlines():
+                line_str = line.strip()
+                match = re.search(pattern, line_str)
+                if match:
+                    port, proto, state, service, version = match.groups()
+                    port_key = f"{port}/{proto}"
+
+                    clean_service = service.replace("?", "").strip()
+                    clean_version = (
+                        version.strip()
+                        if (version and "Nmap scan report" not in version)
+                        else "unknown"
+                    )
+
+                    current_info = self.shared_memory["discovered_services"].get(port_key, {})
+                    current_version = current_info.get("version", "unknown")
+
+                    if (
+                        port_key not in self.shared_memory["discovered_services"]
+                        or (clean_version != "unknown" and current_version == "unknown")
+                    ):
+                        self.shared_memory["discovered_services"][port_key] = {
+                            "name": clean_service,
+                            "version": clean_version,
+                        }
+
+        # 💡 2. 解析 LLM 回傳的全域 Vendor 廠商資訊 (例如 "D-Link Systems")
+        extracted_vendor = perception_result.get("vendor", perception_result.get("device_vendor", ""))
+        if extracted_vendor and extracted_vendor.lower() != "unknown":
+            self.shared_memory["vendor"] = extracted_vendor
+
+        # 3. 第二層保險：解析 LLM (Qwen2.5-Coder) 回傳的 JSON 服務列表
+        services = perception_result.get("services", {})
+
         for port, info in services.items():
             port_str = self._normalize_port(port)
 
@@ -389,38 +527,31 @@ class IoTPipelineOrchestrator:
                 service_version = "unknown"
 
             current_node = self.shared_memory["discovered_services"].get(port_str, {})
-            final_name = service_name if service_name != "unknown" else current_node.get("name", "unknown")
-            final_version = service_version if service_version != "unknown" else current_node.get("version", "unknown")
+            final_name = (
+                service_name
+                if service_name != "unknown"
+                else current_node.get("name", "unknown")
+            )
+            final_version = (
+                service_version
+                if service_version != "unknown"
+                else current_node.get("version", "unknown")
+            )
 
             self.shared_memory["discovered_services"][port_str] = {
                 "name": final_name,
-                "version": final_version
+                "version": final_version,
             }
 
-        # 2. 處理 open_ports：若埠號已被 services 建檔（無論 tcp/udp），就不再重複補建
-        for p in open_ports:
-            p_str = str(p).strip().lower()
-            # 檢查目前記憶體中是否已有該 Port (例如已存在 "67/udp" 或 "80/tcp")
-            already_exists = any(
-                existing_key == p_str or existing_key.startswith(f"{p_str}/")
-                for existing_key in self.shared_memory["discovered_services"]
-            )
-            if not already_exists:
-                port_str = self._normalize_port(p_str)
-                self.shared_memory["discovered_services"][port_str] = {
-                    "name": "unknown",
-                    "version": "unknown"
-                }
-
-        # 3. 同步到 TaskTree
+        # 4. 同步到 TaskTree
         if hasattr(self, "task_tree"):
             self.task_tree.scanned_ports = {
-                port: {
-                    "service": info["name"],
-                    "version": info["version"]
-                }
+                port: {"service": info["name"], "version": info["version"]}
                 for port, info in self.shared_memory["discovered_services"].items()
             }
+            # 如果 TaskTree 也支援記錄 vendor，同步寫入
+            if hasattr(self.task_tree, "vendor"):
+                self.task_tree.vendor = self.shared_memory["vendor"]
 
     def _update_stage2_memory(self, perception_result: dict):
         """解析 Stage 2 的 JSON，更新漏洞評估與目標選擇記憶"""

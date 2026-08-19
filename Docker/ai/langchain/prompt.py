@@ -42,13 +42,17 @@ CRITICAL STATE-KEEPING & MEMORY RULES (ANTI-AMNESIA):
 _FALLBACK_STRATEGIES = """WHEN STUCK - FALLBACK STRATEGIES FOR IOT RECON & EXPLOIT:
 If your current automated approach isn't returning explicit service versions or vulnerability matches, systematically pivot using these strategies:
 
-1. **Missing Web Server Version on Port 80/443?**
-   - Fallback: Immediately recommend "RUN_NIKTO" to grab raw HTTP headers, Server banners, and potential CGI management paths. Do not attempt blind exploitation.
+1. **Web Version/Header Discovery**:
+   - If initial scan lacks detailed HTTP headers: Try "RUN_CURL" or "RUN_NIKTO".
+   - **CRITICAL**: Do NOT run the same web scanning tool (Nikto/Curl) more than ONCE.
 
-2. **Web Main Page is Blank or Requires Authentication?**
+2. **If Web Scan Completed**:
+   - Do NOT retry Nikto or Curl. Mark recon as complete and propose "SEARCH_RAG_POC".
+
+3. **Web Main Page is Blank or Requires Authentication?**
    - Fallback: Recommend "RUN_DIRSEARCH" to brute-force hidden paths (e.g., /cgi-bin/, /ws/, /sub_page/). IoT devices often hide vulnerability-prone endpoints behind standard login portals.
 
-3. **Exploit Tool Fails or Timeout?**
+4. **Exploit Tool Fails or Timeout?**
    - Fallback: Do not retry the same exploit blindly. Trigger "SEARCH_RAG_POC" to query an alternative CVE PoC script for the detected version, or re-verify alternative open ports.If all vectors fail, output "NONE" to terminate and document the negative result honestly.
 
 Remember: In real-world IoT pentesting, security patches might exist. If no vulnerability is confirmed after full enumeration, document the current security posture instead of hallucinating exploits."""
@@ -81,23 +85,30 @@ STRICT OUTPUT FORMAT CONSTRAINT:
 2. Do NOT write any introductory text, markdown explanations, or recommendations outside the JSON.
 3. Do NOT wrap the output in markdown code blocks like ```json or ```. Output raw JSON only!
 
-REQUIRED JSON SCHEMA:
+REQUIRED JSON SCHEMA (EXAMPLE WHEN RECON IS COMPLETE):
 {{
   "status": "success",
-  "target": "192.168.0.1",
+  "target": "<TARGET_IP>",
   "stage1_status": {{
-    "is_recon_completed": false, 
-    "reason": "Found HTTP service on port 80 with unknown version. Need to run Nikto for further web banner grabbing."
+    "is_recon_completed": true, 
+    "reason": "Primary port scans (Nmap) and web fingerprinting (Nikto) have both been executed. Extracted core service versions. Silent UDP services are accepted as unknown. Ready to proceed to CVE lookup."
   }},
-  "open_ports": [53, 80],
+  "open_ports": ["<PORT_1/PROTOCOL>", "<PORT_2/PROTOCOL>"],
   "services": {{
-    "53": {{ "service": "dnsmasq", "version": "2.41", "notes": "Exact DNS service and version identified." }},
-    "80": {{ "service": "http", "version": "unknown", "notes": "Web server detected, version hidden. Needs web fingerprinting." }}
+    "<PORT_1/PROTOCOL>": {{ 
+      "service": "<SERVICE_NAME>", 
+      "version": "<EXACT_VERSION_OR_UNKNOWN>", 
+      "notes": "<BRIEF_OBSERVATION>" 
+    }}
   }},
   "web_applications": {{
-    "http://192.168.0.1": {{ "technology": "unknown", "framework": "unknown", "notes": "Pending web tech scan" }}
+    "http://<TARGET_IP>": {{ 
+      "technology": "<DETECTED_WEB_SERVER_OR_UNKNOWN>", 
+      "framework": "<DETECTED_FRAMEWORK_OR_UNKNOWN>", 
+      "notes": "<WEB_SCAN_SUMMARY>" 
+    }}
   }},
-  "recommended_next_steps": ["RUN_NIKTO"]
+  "recommended_next_steps": ["SEARCH_RAG_POC"]
 }}
 """
 

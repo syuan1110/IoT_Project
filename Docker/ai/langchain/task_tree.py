@@ -19,11 +19,17 @@ class TaskTree:
         self.scanned_ports = {} 
         self.global_vectors = []
         self.latest_recommended_steps = []
+        self.vendor = []
 
     def update_from_perception(self, current_stage: str, perception_json: dict) -> str:
         self.target = perception_json.get("target", self.target)
         self.latest_recommended_steps = perception_json.get("recommended_next_steps", [])
         
+        # 💡 新增：自動更新與維護 TaskTree 中的 vendor 屬性
+        extracted_vendor = perception_json.get("vendor", perception_json.get("device_vendor", ""))
+        if extracted_vendor and extracted_vendor.lower() != "unknown":
+            self.vendor = extracted_vendor
+
         new_ports = perception_json.get("open_ports", [])
         services_map = perception_json.get("services", {})
         vectors = perception_json.get("potential_attack_vectors", [])
@@ -79,7 +85,7 @@ class TaskTree:
         # --- Stage 1: 純資產偵察 ---
         if current_stage == "stage1_recon":
             has_ports = len(self.scanned_ports) > 0
-            
+
             all_ports_identified = (
                 has_ports and 
                 all(

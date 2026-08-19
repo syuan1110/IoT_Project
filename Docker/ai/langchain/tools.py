@@ -175,6 +175,70 @@ class PentestToolbox:
         except Exception as e:
             return f"[Nikto Error] {str(e)}"
 
+    def run_curl(self, path: str = "/", port: int = 80, headers: dict = None, timeout: int = 90) -> dict:
+        """動態 curl 探測工具：支援自訂 Port、自訂 Header、並自動擷取 HTML Title 與 D-Link 設備指紋。"""
+        target_url = f"http://{self.target_ip}:{port}{path}"
+
+        # 基礎 curl 指令：包含靜默模式、抓取 Header、超時控制
+        command = ["curl", "-s", "-i", "--connect-timeout", str(timeout)]
+
+        # 如果 AI 帶了自訂 Headers（例如 Host Header 注入）
+        if headers:
+            for key, value in headers.items():
+                command.extend(["-H", f"{key}: {value}"])
+
+        command.append(target_url)
+
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=timeout + 2
+            )
+            raw_output = result.stdout
+
+            # 簡單切分 Header 與 Body 方便分析
+            parts = (
+                raw_output.split("\r\n\r\n", 1)
+                if "\r\n\r\n" in raw_output
+                else raw_output.split("\n\n", 1)
+            )
+            response_headers = parts[0]
+            response_body = parts[1] if len(parts) > 1 else ""
+
+            # 提取 HTTP 狀態碼
+            status_code = "Unknown"
+            for line in response_headers.splitlines():
+                if line.startswith("HTTP/"):
+                    status_code = line.split(" ")[1]
+                    break
+
+            # 💡 新增：提取 HTML <title> 並識別 D-Link 設備指紋
+            title_match = re.search(
+                r"<title>(.*?)</title>", response_body, re.IGNORECASE | re.DOTALL
+            )
+            page_title = title_match.group(1).strip() if title_match else ""
+
+            device_vendor = "Unknown"
+            if "D-LINK" in page_title.upper() or "D-LINK" in response_body.upper():
+                device_vendor = "D-Link Systems"
+
+            return {
+                "status": "success",
+                "status_code": status_code,
+                "headers": response_headers,
+                "body_snippet": response_body[:300],  # 截取前 300 字避免 Token 爆炸
+                "page_title": page_title,  # 💡 提取到的 HTML Title
+                "device_vendor": device_vendor,  # 💡 自動識別廠商 (例如: D-Link Systems)
+                "is_sql_error": (
+                    "sql syntax" in response_body.lower()
+                    or "mysql" in response_body.lower()
+                ),
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout", "error": "Curl request timed out."}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+    
     def run_nvd_lookup(self, discovered_services):
         """
         NVD 漏洞自動批次查詢工具
